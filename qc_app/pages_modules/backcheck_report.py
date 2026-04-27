@@ -123,7 +123,7 @@ def show(project_id: int):
     records = db.get_backcheck_records(project_id)
 
     if role in UPLOAD_ROLES:
-        with st.expander("Upload New Data", expanded=not records):
+        with st.expander("Upload New Data", expanded=True):
             _upload_section(project_id)
         _upload_history(project_id)
         st.markdown("---")

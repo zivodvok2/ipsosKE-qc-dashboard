@@ -662,7 +662,7 @@ def show(project_id: int):
     records = db.get_quality_records(project_id)
 
     if can_upload:
-        with st.expander("Upload New Data", expanded=not records):
+        with st.expander("Upload New Data", expanded=True):
             _upload_section(project_id)
         _upload_history(project_id)
         st.markdown("---")
