@@ -13,6 +13,8 @@ st.set_page_config(
 # Initialise DB once per session
 if "db_init" not in st.session_state:
     db.init_db()
+    import seed
+    seed.run()
     st.session_state["db_init"] = True
 
 # ── Custom CSS ─────────────────────────────────────────────────────────────
