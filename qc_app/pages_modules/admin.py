@@ -83,16 +83,20 @@ def show():
         st.markdown("### Projects")
         projects = db.get_all_projects()
         if projects:
-            df = pd.DataFrame(projects)[[
-                "id", "name", "client", "sample_target", "status", "start_date", "end_date"
-            ]]
-            df.columns = ["ID", "Name", "Client", "Target", "Status", "Start", "End"]
+            df_cols = ["id", "job_number", "name", "client", "sample_target", "status", "start_date", "end_date"]
+            existing_cols = [c for c in df_cols if c in projects[0]]
+            df = pd.DataFrame(projects)[existing_cols]
+            col_labels = {"id": "ID", "job_number": "Job No.", "name": "Name", "client": "Client",
+                          "sample_target": "Target", "status": "Status", "start_date": "Start", "end_date": "End"}
+            df.columns = [col_labels.get(c, c) for c in existing_cols]
             st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("#### Add New Project")
         with st.form("add_project_form"):
-            p_name = st.text_input("Project Name *")
+            pa1, pa2 = st.columns(2)
+            p_name = pa1.text_input("Project Name *")
+            p_job  = pa2.text_input("Job Number", placeholder="e.g. KE-2025-042")
             p_client = st.text_input("Client / Study Name")
             p_target = st.number_input("Sample Target", min_value=0, value=1000, step=50)
             c1, c2 = st.columns(2)
@@ -112,13 +116,14 @@ def show():
                     str(p_start), str(p_end),
                     p_bc, p_li, p_acc,
                     st.session_state["user_id"],
+                    job_number=p_job.strip() or None,
                 )
                 st.success(f"Project '{p_name}' created.")
                 st.rerun()
 
         st.markdown("#### Edit Project")
         if projects:
-            proj_opts = {p["name"]: p["id"] for p in projects}
+            proj_opts = {f"{p.get('job_number', '') and p['job_number']+' — ' or ''}{p['name']}": p["id"] for p in projects}
             sel_proj = st.selectbox("Select Project to Edit", list(proj_opts.keys()), key="edit_proj")
             sel_pid = proj_opts[sel_proj]
             cur = next(p for p in projects if p["id"] == sel_pid)
@@ -131,7 +136,9 @@ def show():
                     except Exception:
                         return _date.today()
 
-                e_name   = st.text_input("Project Name *", value=cur["name"])
+                ep1, ep2 = st.columns(2)
+                e_name   = ep1.text_input("Project Name *", value=cur["name"])
+                e_job    = ep2.text_input("Job Number", value=cur.get("job_number") or "")
                 e_client = st.text_input("Client / Study Name", value=cur.get("client") or "")
                 e_target = st.number_input("Sample Target", min_value=0,
                                            value=int(cur.get("sample_target") or 0), step=50)
@@ -144,6 +151,30 @@ def show():
                 e_acc = ec5.slider("Accompaniment Target (%)", 5, 50, int(round((cur.get("accompaniment_target") or 0.20) * 100))) / 100
                 e_status = st.selectbox("Status", ["active", "paused", "completed"],
                                         index=["active", "paused", "completed"].index(cur.get("status", "active")))
+
+                st.markdown("##### Flag Calibration (project-specific)")
+                fc1, fc2, fc3, fc4 = st.columns(4)
+                e_loi_min = fc1.number_input(
+                    "Min LOI (minutes)", min_value=0.0, max_value=120.0, step=0.5,
+                    value=float(cur.get("loi_min_minutes") or 0),
+                    help="Absolute minimum interview duration. 0 = not used.",
+                )
+                e_loi_pct = fc2.slider(
+                    "Short LOI threshold (% of avg)", 10, 80,
+                    int(round((cur.get("loi_pct_threshold") or 0.50) * 100)),
+                    help="Flag interviews shorter than X% of project average.",
+                ) / 100
+                e_warn_pct = fc3.slider(
+                    "Flag warning level (%)", 1, 20,
+                    int(round(cur.get("flag_warning_pct") or 5.0)),
+                    help="Flagged rate at which a warning alert is raised.",
+                )
+                e_crit_pct = fc4.slider(
+                    "Flag critical level (%)", 1, 30,
+                    int(round(cur.get("flag_critical_pct") or 10.0)),
+                    help="Flagged rate at which a critical alert is raised.",
+                )
+
                 save_edit = st.form_submit_button("Save Changes", use_container_width=True)
 
             if save_edit:
@@ -152,10 +183,13 @@ def show():
                 else:
                     db.update_project(
                         sel_pid,
-                        name=e_name, client=e_client, sample_target=e_target,
+                        name=e_name, job_number=e_job.strip() or None,
+                        client=e_client, sample_target=e_target,
                         start_date=str(e_start), end_date=str(e_end),
                         backcheck_target=e_bc, listenin_target=e_li,
                         accompaniment_target=e_acc, status=e_status,
+                        loi_min_minutes=e_loi_min, loi_pct_threshold=e_loi_pct,
+                        flag_warning_pct=float(e_warn_pct), flag_critical_pct=float(e_crit_pct),
                     )
                     st.success(f"Project '{e_name}' updated.")
                     st.rerun()

@@ -5,6 +5,7 @@ from pages_modules import (
     quality_report, backcheck_report, cancelled_interviews,
     performance_report, timing_report, listen_in, wave_comparison,
 )
+from utils.exports import generate_project_report
 
 
 TABS = [
@@ -36,11 +37,28 @@ def show():
         st.error("You do not have access to this project's details.")
         return
 
-    # Back button
-    if st.button("← Back to Dashboard"):
-        st.session_state["page"] = "dashboard"
-        st.session_state["project_id"] = None
-        st.rerun()
+    # Back button + report download
+    nav1, nav2 = st.columns([3, 1])
+    with nav1:
+        if st.button("← Back to Dashboard"):
+            st.session_state["page"] = "dashboard"
+            st.session_state["project_id"] = None
+            st.rerun()
+    with nav2:
+        try:
+            report_bytes = generate_project_report(project_id)
+            safe_name = (project.get("name") or "project").replace(" ", "_")
+            job_part = f"_{project['job_number']}" if project.get("job_number") else ""
+            st.download_button(
+                "📥 Download Full Report",
+                data=report_bytes,
+                file_name=f"QC_Report{job_part}_{safe_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
+        except Exception:
+            pass
 
     # Project header
     status_color = {"active": "#2E7D32", "completed": "#1565C0", "paused": "#E65100"}.get(
@@ -65,13 +83,14 @@ def show():
     bc_icon = "✅" if bc_rate >= bc_target_pct else "⚠️"
     li_icon = "✅" if li_rate >= li_target_pct else "⚠️"
 
+    job_str = f"&nbsp;·&nbsp;Job: {project['job_number']}" if project.get("job_number") else ""
     st.markdown(
         f"""<div style="background:{IPSOS_NAVY}; color:white; padding:1.2rem 1.5rem;
              border-radius:10px; margin-bottom:1rem;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:1rem;">
                 <div>
                     <h2 style="margin:0; color:white;">{project['name']}</h2>
-                    <span style="color:#aaa;">Client: {project.get('client') or '—'} &nbsp;|&nbsp;
+                    <span style="color:#aaa;">Client: {project.get('client') or '—'}{job_str} &nbsp;|&nbsp;
                     {project.get('start_date', '?')} → {project.get('end_date', '?')}</span>
                 </div>
                 <div style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">

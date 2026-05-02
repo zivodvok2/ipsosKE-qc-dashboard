@@ -114,12 +114,25 @@ def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
 def _upload_section(project_id: int):
     st.markdown("#### Upload Quality Report Data")
 
-    wave_label = st.text_input(
-        "Wave / Period label",
-        placeholder="e.g. Wave 1, April 2025, Q2",
-        key="qr_wave",
-        help="Tag this upload with a wave or period so data can be compared across waves later.",
-    )
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        wave_label = st.text_input(
+            "Wave / Period label",
+            placeholder="e.g. Wave 1, April 2025, Q2 — used for wave comparison",
+            key="qr_wave",
+            help="Tag this upload with a wave/period label. Leave blank to add to the running total.",
+        )
+    with col_b:
+        upload_mode = st.selectbox(
+            "Upload mode",
+            ["Append (skip duplicate Instance IDs)", "Replace wave data", "Save all (allow duplicates)"],
+            key="qr_upload_mode",
+            help=(
+                "Append: new records only — skips rows whose Instance ID already exists in this project.\n"
+                "Replace wave: deletes ALL previous data for this wave label, then inserts the new file.\n"
+                "Save all: inserts every row regardless of duplicates."
+            ),
+        )
 
     tpl_col, up_col = st.columns([1, 2])
     with tpl_col:
@@ -235,16 +248,11 @@ def _upload_section(project_id: int):
         std_keep = [c for c in (QUALITY_REQUIRED_COLS + QUALITY_OPTIONAL_COLS) if c in df.columns]
         std_df = df[std_keep].copy()
 
-        # Merge selected extra columns back (they kept original names pre-rename)
-        # After rename, extra cols that weren't renamed still have original names
         for ec in selected_extra:
-            # ec may have been renamed if it happened to match an iField alias
             if ec in df.columns:
                 std_df[ec] = df[ec].values
-            # If the original column was renamed to something, it won't be in unmapped_src
 
         records = std_df.where(pd.notna(std_df), None).to_dict("records")
-        # Lowercase all standard keys for DB insert; extras remain as-is in extra_data
         std_keys_lower = {c: c.lower() for c in QUALITY_REQUIRED_COLS + QUALITY_OPTIONAL_COLS}
         normalised = []
         for r in records:
@@ -253,12 +261,35 @@ def _upload_section(project_id: int):
                 norm[std_keys_lower.get(k, k)] = v
             normalised.append(norm)
 
+        label = wave_label.strip() or None
+        mode = upload_mode
+
+        # Handle upload mode
+        if mode == "Replace wave data":
+            if not label:
+                st.error("A Wave/Period label is required for 'Replace wave data' mode.")
+                st.stop()
+            db.delete_wave_records(project_id, label, "quality_report")
+            st.info(f"Previous data for wave '{label}' deleted.")
+
+        elif mode == "Append (skip duplicate Instance IDs)":
+            existing_ids = db.get_quality_instance_ids(project_id)
+            before = len(normalised)
+            normalised = [r for r in normalised if r.get("instance_id") not in existing_ids]
+            skipped = before - len(normalised)
+            if skipped:
+                st.info(f"Skipped {skipped} duplicate Instance ID(s) already in the database.")
+
+        if not normalised:
+            st.warning("No new records to save after deduplication.")
+            st.stop()
+
         uid = db.insert_quality_records(
             project_id,
             st.session_state["user_id"],
             uploaded.name,
             normalised,
-            wave_label=wave_label.strip() or None,
+            wave_label=label,
         )
         extra_msg = f" + {len(selected_extra)} extra column(s)" if selected_extra else ""
         st.success(f"Saved {len(normalised)} records{extra_msg} (upload ID: {uid[:8]}…)")
@@ -452,21 +483,68 @@ def _charts_section(df: pd.DataFrame, project: dict):
                               title="Errors by Interviewer")
             st.plotly_chart(fig, use_container_width=True, key="qr_errors_by_interviewer")
 
-    # Row 3: Productivity trend (interviews per day)
+    # Row 3: Productivity trend (interviews per day) — enhanced
     if "interview_date" in fdf.columns and "interviewer_id" in fdf.columns:
-        st.markdown("##### Productivity Trend (Interviews per Day)")
-        prod_df = (
-            fdf.groupby(["interview_date", "interviewer_id"])
-            .size()
-            .reset_index(name="Count")
-        )
+        st.markdown("##### Productivity per Date per Interviewer")
+        prod_df = fdf.copy()
         prod_df["interview_date"] = pd.to_datetime(prod_df["interview_date"], errors="coerce")
         prod_df = prod_df.dropna(subset=["interview_date"])
+
         if not prod_df.empty:
-            fig = line_chart(prod_df, x="interview_date", y="Count",
-                             color="interviewer_id",
-                             title="Interviews per Day per Interviewer")
-            st.plotly_chart(fig, use_container_width=True, key="qr_productivity")
+            # Date range filter for this chart
+            pf1, pf2, pf3 = st.columns([2, 2, 2])
+            date_min = prod_df["interview_date"].min().date()
+            date_max = prod_df["interview_date"].max().date()
+            with pf1:
+                p_from = st.date_input("From date", value=date_min, key="prod_from",
+                                       min_value=date_min, max_value=date_max)
+            with pf2:
+                p_to = st.date_input("To date", value=date_max, key="prod_to",
+                                     min_value=date_min, max_value=date_max)
+            with pf3:
+                prod_view = st.radio("View", ["Daily", "Cumulative"], horizontal=True, key="prod_view")
+
+            prod_filt = prod_df[
+                (prod_df["interview_date"].dt.date >= p_from) &
+                (prod_df["interview_date"].dt.date <= p_to)
+            ]
+
+            daily_prod = (
+                prod_filt.groupby(["interview_date", "interviewer_id"])
+                .size()
+                .reset_index(name="Interviews")
+            )
+
+            if not daily_prod.empty:
+                if prod_view == "Cumulative":
+                    daily_prod = daily_prod.sort_values(["interviewer_id", "interview_date"])
+                    daily_prod["Interviews"] = daily_prod.groupby("interviewer_id")["Interviews"].cumsum()
+                    chart_title = "Cumulative Interviews per Interviewer"
+                else:
+                    chart_title = "Interviews per Day per Interviewer"
+
+                fig = line_chart(daily_prod, x="interview_date", y="Interviews",
+                                 color="interviewer_id", title=chart_title)
+                st.plotly_chart(fig, use_container_width=True, key="qr_productivity")
+
+                # Grouped bar: interviews per interviewer per date
+                st.markdown("###### Daily Interviews by Interviewer")
+                import plotly.express as px
+                fig_bar = px.bar(
+                    daily_prod,
+                    x="interview_date", y="Interviews",
+                    color="interviewer_id",
+                    barmode="group",
+                    title="Interviews per Day — Grouped by Interviewer",
+                    labels={"interview_date": "Date", "Interviews": "Interviews", "interviewer_id": "Interviewer"},
+                    color_discrete_sequence=CHART_COLORS,
+                )
+                fig_bar.update_layout(
+                    paper_bgcolor="white", plot_bgcolor="#F5F5F5",
+                    margin=dict(l=20, r=20, t=40, b=60),
+                    legend=dict(orientation="h", y=-0.2),
+                )
+                st.plotly_chart(fig_bar, use_container_width=True, key="qr_prod_bar")
 
     # Row 4: Duration per interviewer
     if "duration_minutes" in fdf.columns and "interviewer_id" in fdf.columns:
@@ -555,9 +633,13 @@ def _data_table(df: pd.DataFrame):
 
 # ── Quality Queries & Mitigation ──────────────────────────────────────────
 
-def _quality_queries_section(df: pd.DataFrame):
+def _quality_queries_section(df: pd.DataFrame, project: dict = None):
     st.markdown("---")
     c_left, c_right = st.columns(2)
+
+    # Calibration thresholds
+    loi_pct = float((project or {}).get("loi_pct_threshold") or 0.50)
+    loi_min = float((project or {}).get("loi_min_minutes") or 0)
 
     with c_left:
         st.markdown(
@@ -574,38 +656,53 @@ def _quality_queries_section(df: pd.DataFrame):
         total = len(df)
 
         if "straight_lining_flag" in df.columns:
-            n = df["straight_lining_flag"].sum()
+            n = int(df["straight_lining_flag"].sum())
             if n:
                 issues.append(f"Self-administration / straight-lining detected ({n} records, {round(n/total*100,1)}%)")
         if "long_pause" in df.columns:
-            n = (df["long_pause"].apply(lambda x: str(x).strip() not in ("0", "", "None")) ).sum()
+            n = int((df["long_pause"].apply(lambda x: str(x).strip() not in ("0", "", "None"))).sum())
             if n:
                 issues.append(f"Long pauses detected during interview ({n} records)")
         if "gps_status" in df.columns:
-            dup = (df["gps_status"].str.lower() == "duplicate").sum()
-            miss = (df["gps_status"].str.lower() == "missing").sum()
+            dup = int((df["gps_status"].str.lower() == "duplicate").sum())
+            miss = int((df["gps_status"].str.lower() == "missing").sum())
             if dup or miss:
-                issues.append(f"Duplicate or missing GPS co-ordinates ({dup + miss} records)")
+                issues.append(f"Duplicate or missing GPS co-ordinates ({dup + miss} records: {dup} duplicate, {miss} missing)")
         if "phone_present" in df.columns:
-            n = (df["phone_present"].str.lower() == "no").sum()
+            n = int((df["phone_present"].str.lower() == "no").sum())
             if n:
                 issues.append(f"Missing telephone numbers ({n} records)")
         if "audio_present" in df.columns:
-            n = (df["audio_present"].str.lower() == "no").sum()
+            n = int((df["audio_present"].str.lower() == "no").sum())
             if n:
                 issues.append(f"Missing audio recordings ({n} records)")
+
+        # LOI flagging — project-calibrated
         if "duration_flag" in df.columns:
-            n = (df["duration_flag"].str.lower() == "flag").sum()
-            if n:
-                issues.append(f"LOI < 50% of average — interviews flagged for short duration ({n} records)")
+            n_ifield = int((df["duration_flag"].str.lower() == "flag").sum())
+            if n_ifield:
+                issues.append(f"Short LOI flagged by iField ({n_ifield} records)")
+
+        if "duration_minutes" in df.columns:
+            avg_dur = df["duration_minutes"].mean()
+            # Calibrated threshold: max(absolute min, pct of avg)
+            threshold = max(loi_min, avg_dur * loi_pct) if avg_dur else loi_min
+            if threshold > 0:
+                n_short = int((df["duration_minutes"] < threshold).sum())
+                if n_short:
+                    issues.append(
+                        f"Short LOI by project threshold (< {threshold:.1f} min = "
+                        f"{int(loi_pct*100)}% of avg {avg_dur:.1f} min): {n_short} records"
+                    )
+
         if "approval_status" in df.columns:
-            n = (df["approval_status"].str.lower() == "cancelled").sum()
+            n = int((df["approval_status"].str.lower() == "cancelled").sum())
             if n:
                 issues.append(f"Cancelled / invalid interviews ({n} records)")
 
         if issues:
             for issue in issues:
-                st.markdown(f"- {issue}")
+                st.markdown(f"- ⚠️ {issue}")
         else:
             st.success("No quality queries flagged for this dataset.")
 
@@ -685,4 +782,4 @@ def show(project_id: int):
     _bc_acc_block(df, project)
     _charts_section(df, project)
     _data_table(df)
-    _quality_queries_section(df)
+    _quality_queries_section(df, project)

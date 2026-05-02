@@ -47,14 +47,16 @@ def _risk_alerts(summary: list[dict]):
             alerts.append(("warning", name,
                             f"Back-check rate {s['backcheck_rate']}% below target {bc_target}%"))
 
-        # High error / flagged rate
-        total = s.get("approved", 0) + s.get("flagged", 0)
+        # High error / flagged rate — use project-specific thresholds if set
+        total = s.get("total_submitted", 0) or (s.get("approved", 0) + s.get("flagged", 0))
+        warn_thresh = s.get("flag_warning_pct") or 5.0
+        crit_thresh = s.get("flag_critical_pct") or 10.0
         if total > 0:
             flag_pct = round(s["flagged"] / total * 100, 1)
-            if flag_pct > 10:
+            if flag_pct >= crit_thresh:
                 alerts.append(("critical", name,
                                 f"High flagged rate: {flag_pct}% of submitted records flagged"))
-            elif flag_pct > 5:
+            elif flag_pct >= warn_thresh:
                 alerts.append(("warning", name,
                                 f"Elevated flagged rate: {flag_pct}% of submitted records"))
 
@@ -164,25 +166,48 @@ def show():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Filters ────────────────────────────────────────────────────────────
-    f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
+    # ── Search + Filters ───────────────────────────────────────────────────
+    search_col, _ = st.columns([2, 3])
+    with search_col:
+        search_term = st.text_input(
+            "Search projects", placeholder="Search by name, job number, or client…",
+            key="dash_search", label_visibility="collapsed"
+        )
+
+    f1, f2, f3, f4, f5 = st.columns([2, 2, 1, 1, 1])
     with f1:
         status_filter = st.multiselect(
-            "Filter by Status", ["active", "completed", "paused"],
+            "Status", ["active", "completed", "paused"],
             default=["active"], key="dash_status"
         )
     with f2:
-        sort_by = st.selectbox(
-            "Sort by", ["Name", "Completion %", "Sample Target"], key="dash_sort"
-        )
+        clients = sorted({s.get("client") or "" for s in summary if s.get("client")})
+        client_filter = st.multiselect("Client", clients, key="dash_client")
     with f3:
-        date_from = st.date_input("Start Date (from)", value=None, key="dash_date_from")
+        sort_by = st.selectbox(
+            "Sort by", ["Name", "Completion %", "Sample Target", "Job No."], key="dash_sort"
+        )
     with f4:
-        date_to = st.date_input("End Date (to)", value=None, key="dash_date_to")
+        date_from = st.date_input("End date from", value=None, key="dash_date_from")
+    with f5:
+        date_to = st.date_input("End date to", value=None, key="dash_date_to")
 
     df = pd.DataFrame(summary)
+
+    # Live search
+    if search_term:
+        term = search_term.lower()
+        mask = (
+            df["name"].fillna("").str.lower().str.contains(term, na=False)
+            | df.get("client", pd.Series(dtype=str)).fillna("").str.lower().str.contains(term, na=False)
+            | df.get("job_number", pd.Series(dtype=str)).fillna("").str.lower().str.contains(term, na=False)
+        )
+        df = df[mask]
+
     if status_filter:
         df = df[df["status"].isin(status_filter)]
+    if client_filter:
+        df = df[df["client"].isin(client_filter)]
 
     # Date range filter — keeps projects whose end_date falls within the range
     if date_from and "end_date" in df.columns:
@@ -198,8 +223,9 @@ def show():
         "Name": "name",
         "Completion %": "completion_pct",
         "Sample Target": "sample_target",
+        "Job No.": "job_number",
     }
-    df = df.sort_values(sort_map[sort_by], ascending=(sort_by == "Name"))
+    df = df.sort_values(sort_map[sort_by], ascending=(sort_by in ("Name", "Job No.")), na_position="last")
 
     # ── Completion bar chart ───────────────────────────────────────────────
     st.markdown("### Completion vs. Target by Project")
@@ -230,8 +256,10 @@ def show():
         with st.container():
             c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 1, 1, 1, 1])
             with c1:
+                job_tag = f'&nbsp;<span style="color:#888;font-size:0.75rem;">[{row["job_number"]}]</span>' if row.get("job_number") else ""
                 st.markdown(
                     f'<span style="font-weight:600;font-size:1rem;">{row["name"]}</span>'
+                    f'{job_tag}'
                     f'&nbsp;&nbsp;<span style="background:{status_color};color:white;'
                     f'border-radius:4px;padding:2px 8px;font-size:0.7rem;">'
                     f'{row["status"].upper()}</span>',

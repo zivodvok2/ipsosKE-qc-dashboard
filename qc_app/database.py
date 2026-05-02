@@ -31,11 +31,16 @@ def init_db():
     CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
+        job_number TEXT,
         client TEXT,
         sample_target INTEGER DEFAULT 0,
         backcheck_target REAL DEFAULT 0.20,
         listenin_target REAL DEFAULT 0.10,
         accompaniment_target REAL DEFAULT 0.20,
+        loi_min_minutes REAL DEFAULT 0,
+        loi_pct_threshold REAL DEFAULT 0.50,
+        flag_warning_pct REAL DEFAULT 5.0,
+        flag_critical_pct REAL DEFAULT 10.0,
         start_date DATE,
         end_date DATE,
         status TEXT DEFAULT 'active',
@@ -218,6 +223,11 @@ def init_db():
     _safe_add_column(conn, "quality_report_records", "extra_data", "TEXT")
     _safe_add_column(conn, "upload_log", "notes", "TEXT")
     _safe_add_column(conn, "upload_log", "wave_label", "TEXT")
+    _safe_add_column(conn, "projects", "job_number", "TEXT")
+    _safe_add_column(conn, "projects", "loi_min_minutes", "REAL DEFAULT 0")
+    _safe_add_column(conn, "projects", "loi_pct_threshold", "REAL DEFAULT 0.50")
+    _safe_add_column(conn, "projects", "flag_warning_pct", "REAL DEFAULT 5.0")
+    _safe_add_column(conn, "projects", "flag_critical_pct", "REAL DEFAULT 10.0")
 
     # Seed a default admin if no users exist
     existing = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -320,23 +330,30 @@ def get_project(project_id):
 
 
 def create_project(name, client, sample_target, start_date, end_date,
-                   backcheck_target, listenin_target, accompaniment_target, created_by):
+                   backcheck_target, listenin_target, accompaniment_target, created_by,
+                   job_number=None, loi_min_minutes=0, loi_pct_threshold=0.50,
+                   flag_warning_pct=5.0, flag_critical_pct=10.0):
     conn = get_conn()
     conn.execute(
         """INSERT INTO projects
-           (name, client, sample_target, start_date, end_date,
-            backcheck_target, listenin_target, accompaniment_target, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (name, client, sample_target, start_date, end_date,
-         backcheck_target, listenin_target, accompaniment_target, created_by),
+           (name, job_number, client, sample_target, start_date, end_date,
+            backcheck_target, listenin_target, accompaniment_target,
+            loi_min_minutes, loi_pct_threshold, flag_warning_pct, flag_critical_pct,
+            created_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (name, job_number, client, sample_target, start_date, end_date,
+         backcheck_target, listenin_target, accompaniment_target,
+         loi_min_minutes, loi_pct_threshold, flag_warning_pct, flag_critical_pct,
+         created_by),
     )
     conn.commit()
     conn.close()
 
 
 def update_project(project_id, **kwargs):
-    allowed = {"name", "client", "sample_target", "start_date", "end_date",
-               "status", "backcheck_target", "listenin_target", "accompaniment_target"}
+    allowed = {"name", "job_number", "client", "sample_target", "start_date", "end_date",
+               "status", "backcheck_target", "listenin_target", "accompaniment_target",
+               "loi_min_minutes", "loi_pct_threshold", "flag_warning_pct", "flag_critical_pct"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
@@ -535,6 +552,45 @@ def insert_timing_records(project_id, uploaded_by, filename, records: list[dict]
     return uid
 
 
+def get_quality_instance_ids(project_id) -> set:
+    """Return the set of instance_ids already stored for a project."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT instance_id FROM quality_report_records WHERE project_id=? AND instance_id IS NOT NULL",
+        (project_id,),
+    ).fetchall()
+    conn.close()
+    return {r["instance_id"] for r in rows}
+
+
+def delete_wave_records(project_id, wave_label, report_type):
+    """Delete all records for a specific wave label within a project."""
+    table_map = {
+        "quality_report": "quality_report_records",
+        "backcheck": "backcheck_records",
+        "cancelled_interviews": "cancelled_interview_records",
+        "performance": "performance_records",
+        "timing": "timing_records",
+        "listen_in": "listen_in_records",
+    }
+    table = table_map.get(report_type)
+    if not table:
+        return
+    conn = get_conn()
+    upload_ids = [r["upload_id"] for r in conn.execute(
+        "SELECT upload_id FROM upload_log WHERE project_id=? AND wave_label=? AND report_type=?",
+        (project_id, wave_label, report_type),
+    ).fetchall()]
+    if upload_ids:
+        ph = ",".join("?" * len(upload_ids))
+        conn.execute(f"DELETE FROM {table} WHERE upload_id IN ({ph})", upload_ids)
+        conn.execute(
+            f"DELETE FROM upload_log WHERE upload_id IN ({ph})", upload_ids
+        )
+        conn.commit()
+    conn.close()
+
+
 def delete_upload(upload_id, report_type):
     table_map = {
         "quality_report": "quality_report_records",
@@ -684,6 +740,7 @@ def get_dashboard_summary():
             "listenin_count": li_count,
             "listenin_rate": li_rate,
             "flagged": qr["flagged"] or 0,
+            "total_submitted": qr["total"] or 0,
         })
 
     conn.close()
